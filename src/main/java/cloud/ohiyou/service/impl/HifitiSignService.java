@@ -16,6 +16,7 @@ import okhttp3.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -89,42 +90,38 @@ public class HifitiSignService implements ISignService {
 
     /**
      * 校验 Cookie 是否有效：访问 my.htm，能解析到用户名/uid 说明登录态正常
+     *
+     * @throws IOException 网络异常（无法判断登录态，不可当作失效）
      */
     @Override
-    public boolean isCookieValid(String cookie) {
-        try {
-            String userAgent = getRandomUserAgent();
+    public boolean isCookieValid(String cookie) throws IOException {
+        String userAgent = getRandomUserAgent();
 
-            Request request = new Request.Builder()
-                    .url(HifiniConstants.HIFITI_USER_INFO_URL)
-                    .get()
-                    .addHeader("Cookie", cookie)
-                    .addHeader("User-Agent", userAgent)
-                    .addHeader("Referer", HifiniConstants.HIFITI_BASE_URL + "/")
-                    .build();
+        Request request = new Request.Builder()
+                .url(HifiniConstants.HIFITI_USER_INFO_URL)
+                .get()
+                .addHeader("Cookie", cookie)
+                .addHeader("User-Agent", userAgent)
+                .addHeader("Referer", HifiniConstants.HIFITI_BASE_URL + "/")
+                .build();
 
-            try (Response response = client.newCall(request).execute()) {
-                if (!response.isSuccessful()) {
-                    logger.warn("HiFiTi Cookie 校验失败，HTTP 状态码: {}", response.code());
-                    return false;
-                }
-                String pageContent = ResponseUtils.readResponse(response);
-                if (pageContent.contains(HifiniConstants.REGEX_LOGIN_PAGE)) {
-                    logger.warn("HiFiTi Cookie 已失效（返回登录页）");
-                    return false;
-                }
-                UserInfoVO userInfo = parseUserInfo(pageContent);
-                boolean valid = userInfo.getUserName() != null;
-                if (!valid) {
-                    logger.warn("HiFiTi Cookie 已失效（页面中未找到用户信息）");
-                } else {
-                    logger.info("HiFiTi Cookie 有效，用户: {}", userInfo.getUserName());
-                }
-                return valid;
+        try (Response response = client.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                throw new IOException("校验登录态失败，HTTP 状态码: " + response.code());
             }
-        } catch (Exception e) {
-            logger.error("HiFiTi 校验 Cookie 异常: {}", e.getMessage(), e);
-            return false;
+            String pageContent = ResponseUtils.readResponse(response);
+            if (pageContent.contains(HifiniConstants.REGEX_LOGIN_PAGE)) {
+                logger.warn("HiFiTi Cookie 已失效（返回登录页）");
+                return false;
+            }
+            UserInfoVO userInfo = parseUserInfo(pageContent);
+            boolean valid = userInfo.getUserName() != null;
+            if (!valid) {
+                logger.warn("HiFiTi Cookie 已失效（页面中未找到用户信息）");
+            } else {
+                logger.info("HiFiTi Cookie 有效，用户: {}", userInfo.getUserName());
+            }
+            return valid;
         }
     }
 
