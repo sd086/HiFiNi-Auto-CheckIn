@@ -1,7 +1,10 @@
 package cloud.ohiyou.service;
 
+import cloud.ohiyou.constant.SignResultCode;
 import cloud.ohiyou.vo.SignResultVO;
 import cloud.ohiyou.vo.UserInfoVO;
+
+import java.io.IOException;
 
 /**
  * 签到服务接口
@@ -38,10 +41,15 @@ public interface ISignService {
     /**
      * 校验 Cookie 是否仍然有效（登录态）
      *
+     * <p>注意：网络异常（IO / 反爬网关握手失败）必须抛 IOException，
+     * 而不能返回 false。否则"网络不通"会被误报成"Cookie 失效"，
+     * 排查时极易走错方向，也会触发不必要的重新登录。</p>
+     *
      * @param cookie cookie
-     * @return true: 已登录；false: 已失效
+     * @return true: 已登录；false: 已明确失效（返回登录页 / 解析不到用户）
+     * @throws IOException 网络异常或网关拦截，无法判断登录态
      */
-    boolean isCookieValid(String cookie);
+    boolean isCookieValid(String cookie) throws IOException;
 
     /**
      * 站点标识（hifiti / hifihi），用于日志与账号密码登录配置
@@ -58,8 +66,15 @@ public interface ISignService {
      */
     default SignResultVO signInWithUserInfo(String cookie) {
         // 关键修复：签到接口对未登录请求也返回 code=0，必须先校验 Cookie 登录态
-        if (!isCookieValid(cookie)) {
-            return new SignResultVO(401, "Cookie已失效，请重新获取 Cookie");
+        try {
+            if (!isCookieValid(cookie)) {
+                return new SignResultVO(SignResultCode.COOKIE_INVALID.getCode(),
+                        "Cookie已失效，请重新获取 Cookie");
+            }
+        } catch (IOException e) {
+            // 网络层问题与登录态无关，不能覆盖成 401，否则会误导用户去换 Cookie
+            return new SignResultVO(SignResultCode.NETWORK_ERROR.getCode(),
+                    "网络异常，无法校验登录态：" + e.getMessage());
         }
 
         SignResultVO signResult = signIn(cookie);
