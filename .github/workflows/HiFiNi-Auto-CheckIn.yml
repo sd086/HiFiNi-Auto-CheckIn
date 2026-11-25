@@ -37,11 +37,14 @@ jobs:
         with:
           java-version: '8'
           distribution: 'temurin'
+          cache: maven
 
       - name: Build and Run
         run: |
           set -o pipefail
-          mvn -B compile exec:java \
+          # 显式指定插件坐标与版本，避免 maven 按前缀解析插件时
+          # 因仓库限流（429）而报 No plugin found for prefix 'exec'
+          mvn -B -ntp org.codehaus.mojo:exec-maven-plugin:3.1.1:java \
             -Dexec.mainClass=cloud.ohiyou.HifiniApplication \
             -Dexec.cleanupDaemonThreads=false 2>&1 | tee run.log
           echo "----- 签到结果摘要 -----"

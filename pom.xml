@@ -87,6 +87,19 @@
 
     <build>
         <plugins>
+            <!-- exec-maven-plugin: GitHub Actions 用 mvn exec:java 运行入口。
+                 必须显式声明并锁定版本，否则 Maven 需要联网按前缀解析插件，
+                 遇到仓库限流（429）就会报 No plugin found for prefix 'exec' 而构建失败。 -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.1.1</version>
+                <configuration>
+                    <mainClass>cloud.ohiyou.HifiniApplication</mainClass>
+                    <cleanupDaemonThreads>false</cleanupDaemonThreads>
+                </configuration>
+            </plugin>
+
             <!-- Maven Shade Plugin: 打包可执行 fat jar -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
