@@ -86,13 +86,14 @@ public class HifihiSignService implements ISignService {
     }
 
     /**
-     * 确保 Cookie 中带有 guardret（站点 JS 反爬网关要求）。
-     * 先访问一次首页完成握手，返回可直接用于后续请求的 Cookie；握手失败时回退原 Cookie。
+     * 确保 Cookie 中带有有效的 guardret（站点 JS 反爬网关要求）。
+     *
+     * <p>这里不判断 Cookie 里是否已有 guardret：网关的 guard 是一次性且会过期的，
+     * 复用旧值大概率被拒绝，直接走一次握手（额外一个 GET）最稳。
+     *
+     * @return 可直接用于后续请求的 Cookie；握手失败时回退原 Cookie
      */
     private String ensureGuard(String cookie, String userAgent) {
-        if (cookie != null && cookie.contains("guardret=")) {
-            return cookie;
-        }
         try {
             GuardSolver.Result result = GuardSolver.get(client,
                     HttpUrl.get(HifiniConstants.HIFIHI_BASE_URL + "/"), cookie,
