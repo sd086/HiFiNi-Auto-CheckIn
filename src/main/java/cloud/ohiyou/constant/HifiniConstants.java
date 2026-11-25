@@ -18,11 +18,14 @@ public final class HifiniConstants {
     public static final String HIFITI_BASE_URL = "https://www.hifiti.com";
     public static final String HIFITI_SIGN_URL = HIFITI_BASE_URL + "/sg_sign.htm";
     public static final String HIFITI_USER_INFO_URL = HIFITI_BASE_URL + "/my.htm";
+    /** 账号密码登录接口（Xiuno BBS），password 需为 32 位小写 MD5 */
+    public static final String HIFITI_LOGIN_URL = HIFITI_BASE_URL + "/user-login.htm";
 
     // ==================== HiFiHi URL 常量 ====================
     public static final String HIFIHI_BASE_URL = "https://hifihi.com";
     public static final String HIFIHI_SIGN_URL = HIFIHI_BASE_URL + "/sg_sign.htm";
     public static final String HIFIHI_USER_INFO_URL = HIFIHI_BASE_URL + "/my.htm";
+    public static final String HIFIHI_LOGIN_URL = HIFIHI_BASE_URL + "/user-login.htm";
 
     // 兼容旧代码
     @Deprecated
@@ -36,6 +39,10 @@ public final class HifiniConstants {
     public static final String COOKIE_KEY_BBS_SID = "bbs_sid";
     public static final String COOKIE_KEY_BBS_TOKEN = "bbs_token";
     public static final String COOKIE_SEPARATOR = "&";
+
+    // ==================== 站点标识 ====================
+    public static final String SITE_HIFITI = "hifiti";
+    public static final String SITE_HIFIHI = "hifihi";
 
     // ==================== 线程池配置 ====================
     public static final int DEFAULT_THREAD_POOL_SIZE = 5;
@@ -57,7 +64,10 @@ public final class HifiniConstants {
 
     // ==================== 正则表达式 ====================
     public static final String REGEX_USERNAME = "<li class=\"nav-item username\"><a class=\"nav-link\" href=\"my.htm\"><img class=\"avatar-1\" src=\".*?\"> (.*?)</a></li>";
+    public static final String REGEX_USERNAME_FALLBACK = "var\\s+uid\\s*=\\s*'(\\d+)'";
     public static final String REGEX_COINS = "<span class=\"text-muted\">金币：</span><em style=\"color: #f57e42;font-style: normal;font-weight: bolder;\">(\\d+)</em>";
     public static final String REGEX_SIGN_STREAK = "var s3 = '连续签到(\\d+)天';";
     public static final String REGEX_SIGN_STREAK_FALLBACK = "连续签到(\\d+)天";
+    /** 未登录标志：游客页面的 uid 为 0，且会出现"用户登录"标题 */
+    public static final String REGEX_LOGIN_PAGE = "<title>用户登录</title>";
 }

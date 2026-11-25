@@ -3,6 +3,10 @@ package cloud.ohiyou.constant;
 /**
  * 签到结果码枚举
  *
+ * <p>注意：站点签到接口在未登录时返回的 HTTP 状态是 200，body 为
+ * {"code":"0","message":"请登录后再签到!"}，也就是 code 同样为 "0"。
+ * 因此不能只看 code 判断成败，必须结合 message 与登录态校验。</p>
+ *
  * @author ohiyou
  */
 public enum SignResultCode {
@@ -55,5 +59,14 @@ public enum SignResultCode {
      */
     public boolean isSuccess() {
         return this == SUCCESS || this == ALREADY_SIGNED;
+    }
+
+    /**
+     * 判断是否为需要重新登录的失效状态
+     *
+     * @return 是否需要重新登录
+     */
+    public boolean isAuthFailure() {
+        return this == COOKIE_INVALID;
     }
 }

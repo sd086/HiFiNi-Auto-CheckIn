@@ -68,6 +68,11 @@ public final class OkHttpUtils {
                 .connectTimeout(HifiniConstants.DEFAULT_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 .readTimeout(HifiniConstants.DEFAULT_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 .writeTimeout(HifiniConstants.DEFAULT_WRITE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                // 默认就是 HTTP/1.1，这里显式指定，避免个别环境下 h2 协商导致的 PROTOCOL_ERROR
+                .protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1))
+                // 跟随重定向（登录态失效时站点可能返回 302）
+                .followRedirects(true)
+                .followSslRedirects(true)
                 .build();
     }
 

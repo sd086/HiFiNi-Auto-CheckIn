@@ -1,22 +1,30 @@
 package cloud.ohiyou.service.impl;
 
+import cloud.ohiyou.config.AccountConfig;
 import cloud.ohiyou.constant.HifiniConstants;
+import cloud.ohiyou.constant.SignResultCode;
 import cloud.ohiyou.service.ISignService;
+import cloud.ohiyou.utils.CryptoUtils;
 import cloud.ohiyou.utils.OkHttpUtils;
 import cloud.ohiyou.utils.ResponseUtils;
+import cloud.ohiyou.utils.SignResponseParser;
 import cloud.ohiyou.vo.SignResultVO;
 import cloud.ohiyou.vo.UserInfoVO;
 import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONObject;
 import okhttp3.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * HiFiNi 签到服务实现
+ * HiFiTi 签到服务实现
  *
  * @author ohiyou
  */
@@ -26,6 +34,11 @@ public class HifitiSignService implements ISignService {
 
     private static final OkHttpClient client = OkHttpUtils.getClient();
     private final Random random = new Random();
+
+    @Override
+    public String getSiteName() {
+        return HifiniConstants.SITE_HIFITI;
+    }
 
     /**
      * 签到
@@ -42,26 +55,28 @@ public class HifitiSignService implements ISignService {
                     MediaType.get("application/x-www-form-urlencoded; charset=UTF-8"));
 
             Request request = new Request.Builder()
-                    .url(HifiniConstants.SIGN_URL)
+                    .url(HifiniConstants.HIFITI_SIGN_URL)
                     .post(emptyBody)
                     .addHeader("Cookie", cookie)
                     .addHeader("User-Agent", userAgent)
                     .addHeader("X-Requested-With", "XMLHttpRequest")
-                    .addHeader("Referer", HifiniConstants.SIGN_URL)
+                    .addHeader("Referer", HifiniConstants.HIFITI_SIGN_URL)
+                    .addHeader("Accept", "application/json, text/javascript, */*; q=0.01")
                     .build();
 
             try (Response response = client.newCall(request).execute()) {
                 if (!response.isSuccessful()) {
-                    return new SignResultVO(2, "请求失败，Http状态码：" + response.code());
+                    return new SignResultVO(SignResultCode.FAILURE.getCode(),
+                            "请求失败，Http状态码：" + response.code());
                 }
 
                 String responseBody = ResponseUtils.readResponse(response);
-                logger.info("签到响应内容: {}", responseBody);
-                return JSON.parseObject(responseBody, SignResultVO.class);
+                logger.info("HiFiTi 签到响应内容: {}", responseBody);
+                return SignResponseParser.parse(responseBody);
             }
         } catch (Exception e) {
             logger.error("签到异常: {}", e.getMessage(), e);
-            return new SignResultVO(2, "签到异常：" + e.getMessage());
+            return new SignResultVO(SignResultCode.NETWORK_ERROR.getCode(), "签到异常：" + e.getMessage());
         }
     }
 
@@ -70,6 +85,131 @@ public class HifitiSignService implements ISignService {
      */
     private String getRandomUserAgent() {
         return HifiniConstants.USER_AGENTS.get(random.nextInt(HifiniConstants.USER_AGENTS.size()));
+    }
+
+    /**
+     * 校验 Cookie 是否有效：访问 my.htm，能解析到用户名/uid 说明登录态正常
+     */
+    @Override
+    public boolean isCookieValid(String cookie) {
+        try {
+            String userAgent = getRandomUserAgent();
+
+            Request request = new Request.Builder()
+                    .url(HifiniConstants.HIFITI_USER_INFO_URL)
+                    .get()
+                    .addHeader("Cookie", cookie)
+                    .addHeader("User-Agent", userAgent)
+                    .addHeader("Referer", HifiniConstants.HIFITI_BASE_URL + "/")
+                    .build();
+
+            try (Response response = client.newCall(request).execute()) {
+                if (!response.isSuccessful()) {
+                    logger.warn("HiFiTi Cookie 校验失败，HTTP 状态码: {}", response.code());
+                    return false;
+                }
+                String pageContent = ResponseUtils.readResponse(response);
+                if (pageContent.contains(HifiniConstants.REGEX_LOGIN_PAGE)) {
+                    logger.warn("HiFiTi Cookie 已失效（返回登录页）");
+                    return false;
+                }
+                UserInfoVO userInfo = parseUserInfo(pageContent);
+                boolean valid = userInfo.getUserName() != null;
+                if (!valid) {
+                    logger.warn("HiFiTi Cookie 已失效（页面中未找到用户信息）");
+                } else {
+                    logger.info("HiFiTi Cookie 有效，用户: {}", userInfo.getUserName());
+                }
+                return valid;
+            }
+        } catch (Exception e) {
+            logger.error("HiFiTi 校验 Cookie 异常: {}", e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * 账号密码登录，成功后返回站点下发的 Cookie（bbs_sid;bbs_token）
+     *
+     * @param account 账号配置
+     * @return 登录成功返回 Cookie，失败返回 null
+     */
+    public String login(AccountConfig account) {
+        try {
+            String userAgent = getRandomUserAgent();
+            Map<String, String> form = new HashMap<>();
+            form.put("email", account.getEmail());
+            // Xiuno BBS 前端会先做一次 md5 再提交
+            form.put("password", CryptoUtils.md5(account.getPassword()));
+
+            RequestBody body = RequestBody.create(buildFormBody(form),
+                    MediaType.get("application/x-www-form-urlencoded; charset=UTF-8"));
+
+            Request request = new Request.Builder()
+                    .url(HifiniConstants.HIFITI_LOGIN_URL)
+                    .post(body)
+                    .addHeader("User-Agent", userAgent)
+                    .addHeader("X-Requested-With", "XMLHttpRequest")
+                    .addHeader("Referer", HifiniConstants.HIFITI_LOGIN_URL)
+                    .build();
+
+            try (Response response = client.newCall(request).execute()) {
+                String responseBody = ResponseUtils.readResponse(response);
+                if (!response.isSuccessful()) {
+                    logger.error("HiFiTi 登录失败，HTTP 状态码: {}", response.code());
+                    return null;
+                }
+
+                JSONObject json = JSON.parseObject(responseBody);
+                String code = json.getString("code");
+                if (!"0".equals(code)) {
+                    logger.error("HiFiTi 登录失败: {}", responseBody);
+                    return null;
+                }
+
+                String bbsSid = null;
+                String bbsToken = null;
+                List<Cookie> cookies = Cookie.parseAll(request.url(), response.headers());
+                for (Cookie cookie : cookies) {
+                    if (HifiniConstants.COOKIE_KEY_BBS_SID.equals(cookie.name())) {
+                        bbsSid = cookie.name() + "=" + cookie.value();
+                    } else if (HifiniConstants.COOKIE_KEY_BBS_TOKEN.equals(cookie.name())) {
+                        bbsToken = cookie.name() + "=" + cookie.value();
+                    }
+                }
+
+                if (bbsSid == null) {
+                    logger.error("HiFiTi 登录成功但未获取到 bbs_sid，返回的 Set-Cookie: {}",
+                            response.headers("Set-Cookie"));
+                    return null;
+                }
+                String newCookie = bbsToken != null ? bbsSid + ";" + bbsToken + ";" : bbsSid + ";";
+                logger.info("HiFiTi 账号密码登录成功, 用户: {}", account.getEmail());
+                return newCookie;
+            }
+        } catch (Exception e) {
+            logger.error("HiFiTi 账号密码登录异常: {}", e.getMessage(), e);
+            return null;
+        }
+    }
+
+    private String buildFormBody(Map<String, String> form) {
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, String> entry : form.entrySet()) {
+            if (sb.length() > 0) {
+                sb.append('&');
+            }
+            sb.append(encode(entry.getKey())).append('=').append(encode(entry.getValue()));
+        }
+        return sb.toString();
+    }
+
+    private String encode(String value) {
+        try {
+            return java.net.URLEncoder.encode(value, "UTF-8");
+        } catch (Exception e) {
+            return value;
+        }
     }
 
     /**
@@ -84,11 +224,11 @@ public class HifitiSignService implements ISignService {
             String userAgent = getRandomUserAgent();
 
             Request request = new Request.Builder()
-                    .url(HifiniConstants.USER_INFO_URL)
+                    .url(HifiniConstants.HIFITI_USER_INFO_URL)
                     .get()
                     .addHeader("Cookie", cookie)
                     .addHeader("User-Agent", userAgent)
-                    .addHeader("Referer", HifiniConstants.BASE_URL + "/")
+                    .addHeader("Referer", HifiniConstants.HIFITI_BASE_URL + "/")
                     .build();
 
             try (Response response = client.newCall(request).execute()) {
@@ -118,11 +258,11 @@ public class HifitiSignService implements ISignService {
             String userAgent = getRandomUserAgent();
 
             Request request = new Request.Builder()
-                    .url(HifiniConstants.SIGN_URL)
+                    .url(HifiniConstants.HIFITI_SIGN_URL)
                     .get()
                     .addHeader("Cookie", cookie)
                     .addHeader("User-Agent", userAgent)
-                    .addHeader("Referer", HifiniConstants.BASE_URL + "/")
+                    .addHeader("Referer", HifiniConstants.HIFITI_BASE_URL + "/")
                     .build();
 
             try (Response response = client.newCall(request).execute()) {

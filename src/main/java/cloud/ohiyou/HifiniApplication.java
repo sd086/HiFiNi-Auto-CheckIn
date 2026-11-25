@@ -1,5 +1,6 @@
 package cloud.ohiyou;
 
+import cloud.ohiyou.config.AccountConfig;
 import cloud.ohiyou.config.EnvConfig;
 import cloud.ohiyou.executor.SignTaskExecutor;
 import cloud.ohiyou.factory.PushStrategyFactory;
@@ -15,7 +16,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * HiFiNi 自动签到应用入口
@@ -27,22 +30,44 @@ public class HifiniApplication {
 
     private static final Logger logger = LoggerFactory.getLogger(HifiniApplication.class);
 
+    /**
+     * 退出码常量：GitHub Actions 里非 0 退出码会让工作流变红，
+     * 避免出现"日志一片绿、其实根本没签到成功"的静默失败。
+     */
+    private static final int EXIT_OK = 0;
+    private static final int EXIT_FAIL = 1;
+
     public static void main(String[] args) {
+        int exitCode = runCheckIn();
+        // 仅在 GitHub Actions / Docker 等独立进程场景下生效。
+        // 云函数（ScfHandler / AliyunFcHandler）复用 main，由 STRICT_FAIL=false 关闭退出，
+        // 避免 System.exit 中断函数运行时的收尾流程。
+        if (exitCode != EXIT_OK) {
+            System.exit(exitCode);
+        }
+    }
+
+    public static int runCheckIn() {
         logger.info("自动签到任务开始");
 
         List<CookieSignResult> allResults = new ArrayList<>();
         CookieHandler cookieHandler = new CookieHandler();
         SignTaskExecutor executor = new SignTaskExecutor();
+        boolean strictFail = true;
 
         try {
             EnvConfig config = EnvConfig.get();
+            strictFail = config.isStrictFail();
+
+            Map<String, AccountConfig> accounts = parseAccounts(config.getHifiniAccount());
 
             // 执行 HiFiTi 签到
             String hifitiCookies = config.getCookie();
             if (hifitiCookies != null && !hifitiCookies.trim().isEmpty()) {
                 logger.info("===== HiFiTi 站点签到开始 =====");
                 List<CookieSignResult> hifitiResults = executeSignIn(
-                        hifitiCookies, new HifitiSignService(), cookieHandler, executor, "HiFiTi");
+                        hifitiCookies, new HifitiSignService(), cookieHandler, executor, "HiFiTi",
+                        accounts.get(cloud.ohiyou.constant.HifiniConstants.SITE_HIFITI));
                 allResults.addAll(hifitiResults);
             } else {
                 logger.info("未设置 HiFiTi Cookie，跳过该站点签到");
@@ -53,7 +78,8 @@ public class HifiniApplication {
             if (hifihiCookies != null && !hifihiCookies.trim().isEmpty()) {
                 logger.info("===== HiFiHi 站点签到开始 =====");
                 List<CookieSignResult> hifihiResults = executeSignIn(
-                        hifihiCookies, new HifihiSignService(), cookieHandler, executor, "HiFiHi");
+                        hifihiCookies, new HifihiSignService(), cookieHandler, executor, "HiFiHi",
+                        accounts.get(cloud.ohiyou.constant.HifiniConstants.SITE_HIFIHI));
                 allResults.addAll(hifihiResults);
             } else {
                 logger.info("未设置 HiFiHi Cookie，跳过该站点签到");
@@ -62,7 +88,7 @@ public class HifiniApplication {
             // 检查是否有任何签到任务
             if (allResults.isEmpty()) {
                 logger.warn("未配置任何站点的 Cookie，无签到任务执行");
-                return;
+                return exitWithError(strictFail, EXIT_FAIL);
             }
 
             // 发布汇总结果
@@ -70,13 +96,52 @@ public class HifiniApplication {
             ResultPublisher publisher = new ResultPublisher(strategies);
             publisher.publish(allResults);
 
+            long failed = allResults.stream()
+                    .filter(r -> r.getSignResult() == null || !r.getSignResult().isSuccess())
+                    .count();
+            logger.info("EXIT_CODE={}", failed > 0 ? EXIT_FAIL : EXIT_OK);
+            if (failed > 0 && strictFail) {
+                logger.error("有 {} 个账号签到失败，工作流标记为失败", failed);
+                return EXIT_FAIL;
+            }
+            return EXIT_OK;
         } catch (Exception e) {
             logger.error("签到任务执行失败: {}", e.getMessage(), e);
+            return exitWithError(strictFail, EXIT_FAIL);
         } finally {
             executor.shutdown();
             OkHttpUtils.shutdown();
             logger.info("自动签到任务完成");
         }
+    }
+
+    /**
+     * 记录退出码并返回；STRICT_FAIL=false 时统一返回 0（保持旧行为，不影响云函数）
+     */
+    private static int exitWithError(boolean strictFail, int code) {
+        logger.info("EXIT_CODE={}", code);
+        return strictFail ? code : EXIT_OK;
+    }
+
+    /**
+     * 解析账号密码配置（HIFINI_ACCOUNT），按站点归类
+     */
+    private static Map<String, AccountConfig> parseAccounts(String raw) {
+        Map<String, AccountConfig> map = new LinkedHashMap<>();
+        if (raw == null || raw.trim().isEmpty()) {
+            return map;
+        }
+        for (String item : raw.split("[&\\r\\n]+")) {
+            AccountConfig account = AccountConfig.parse(item);
+            if (account == null) {
+                logger.warn("HIFINI_ACCOUNT 配置项格式不正确，已忽略: {}", item);
+                continue;
+            }
+            if (!map.containsKey(account.getSite())) {
+                map.put(account.getSite(), account);
+            }
+        }
+        return map;
     }
 
     /**
@@ -87,6 +152,7 @@ public class HifiniApplication {
      * @param cookieHandler cookie处理器
      * @param executor      任务执行器
      * @param siteName      站点名称
+     * @param account       账号密码兜底配置，可为 null
      * @return 签到结果列表
      */
     private static List<CookieSignResult> executeSignIn(
@@ -94,12 +160,14 @@ public class HifiniApplication {
             ISignService signService,
             CookieHandler cookieHandler,
             SignTaskExecutor executor,
-            String siteName) {
+            String siteName,
+            AccountConfig account) {
 
         String[] cookieArray = cookieHandler.splitCookies(cookies);
         logger.info("{}: 检测到 {} 个cookie，开始签到", siteName, cookieArray.length);
 
-        List<CookieSignResult> results = executor.executeSignTasks(cookieArray, signService, cookieHandler);
+        List<CookieSignResult> results = executor.executeSignTasks(
+                cookieArray, signService, cookieHandler, account);
 
         // 为结果添加站点标识
         for (CookieSignResult result : results) {

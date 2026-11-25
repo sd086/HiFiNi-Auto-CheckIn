@@ -1,12 +1,13 @@
 package cloud.ohiyou.service.impl;
 
 import cloud.ohiyou.constant.HifiniConstants;
+import cloud.ohiyou.constant.SignResultCode;
 import cloud.ohiyou.service.ISignService;
 import cloud.ohiyou.utils.OkHttpUtils;
 import cloud.ohiyou.utils.ResponseUtils;
+import cloud.ohiyou.utils.SignResponseParser;
 import cloud.ohiyou.vo.SignResultVO;
 import cloud.ohiyou.vo.UserInfoVO;
-import com.alibaba.fastjson2.JSON;
 import okhttp3.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,6 +27,11 @@ public class HifihiSignService implements ISignService {
 
     private static final OkHttpClient client = OkHttpUtils.getClient();
     private final Random random = new Random();
+
+    @Override
+    public String getSiteName() {
+        return HifiniConstants.SITE_HIFIHI;
+    }
 
     /**
      * 签到
@@ -47,23 +53,24 @@ public class HifihiSignService implements ISignService {
                     .addHeader("Cookie", cookie)
                     .addHeader("User-Agent", userAgent)
                     .addHeader("X-Requested-With", "XMLHttpRequest")
-                    .addHeader("Referer", HifiniConstants.HIFIHI_SIGN_URL)
+                    .addHeader("Referer", HifiniConstants.HIFIHI_BASE_URL + "/")
                     .addHeader("Accept", "application/json, text/javascript, */*; q=0.01")
                     .addHeader("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
                     .build();
 
             try (Response response = client.newCall(request).execute()) {
                 if (!response.isSuccessful()) {
-                    return new SignResultVO(2, "请求失败，Http状态码：" + response.code());
+                    return new SignResultVO(SignResultCode.FAILURE.getCode(),
+                            "请求失败，Http状态码：" + response.code());
                 }
 
                 String responseBody = ResponseUtils.readResponse(response);
                 logger.info("HiFiHi 签到响应内容: {}", responseBody);
-                return JSON.parseObject(responseBody, SignResultVO.class);
+                return SignResponseParser.parse(responseBody);
             }
         } catch (Exception e) {
             logger.error("HiFiHi 签到异常: {}", e.getMessage(), e);
-            return new SignResultVO(2, "签到异常：" + e.getMessage());
+            return new SignResultVO(SignResultCode.NETWORK_ERROR.getCode(), "签到异常：" + e.getMessage());
         }
     }
 
@@ -72,6 +79,49 @@ public class HifihiSignService implements ISignService {
      */
     private String getRandomUserAgent() {
         return HifiniConstants.USER_AGENTS.get(random.nextInt(HifiniConstants.USER_AGENTS.size()));
+    }
+
+    /**
+     * 校验 Cookie 是否有效：访问 my.htm，能解析到用户名说明登录态正常
+     */
+    @Override
+    public boolean isCookieValid(String cookie) {
+        try {
+            String userAgent = getRandomUserAgent();
+
+            Request request = new Request.Builder()
+                    .url(HifiniConstants.HIFIHI_USER_INFO_URL)
+                    .get()
+                    .addHeader("Cookie", cookie)
+                    .addHeader("User-Agent", userAgent)
+                    .addHeader("Referer", HifiniConstants.HIFIHI_BASE_URL + "/")
+                    .addHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                    .addHeader("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+                    .build();
+
+            try (Response response = client.newCall(request).execute()) {
+                if (!response.isSuccessful()) {
+                    logger.warn("HiFiHi Cookie 校验失败，HTTP 状态码: {}", response.code());
+                    return false;
+                }
+                String pageContent = ResponseUtils.readResponse(response);
+                if (pageContent.contains(HifiniConstants.REGEX_LOGIN_PAGE)) {
+                    logger.warn("HiFiHi Cookie 已失效（返回登录页）");
+                    return false;
+                }
+                UserInfoVO userInfo = parseUserInfo(pageContent);
+                boolean valid = userInfo.getUserName() != null;
+                if (!valid) {
+                    logger.warn("HiFiHi Cookie 已失效（页面中未找到用户信息）");
+                } else {
+                    logger.info("HiFiHi Cookie 有效，用户: {}", userInfo.getUserName());
+                }
+                return valid;
+            }
+        } catch (Exception e) {
+            logger.error("HiFiHi 校验 Cookie 异常: {}", e.getMessage(), e);
+            return false;
+        }
     }
 
     /**

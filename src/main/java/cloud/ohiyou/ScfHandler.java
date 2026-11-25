@@ -18,8 +18,8 @@ public class ScfHandler {
      */
     public String mainHandler(String event) {
         try {
-            HifiniApplication.main(new String[]{});
-            return "success";
+            int code = HifiniApplication.runCheckIn();
+            return code == 0 ? "success" : "error: 签到存在失败账号, exitCode=" + code;
         } catch (Exception e) {
             return "error: " + e.getMessage();
         }

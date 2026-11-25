@@ -38,15 +38,7 @@ public class SignResultVO {
      */
     public String getFormattedMessage() {
         StringBuilder sb = new StringBuilder();
-
-        // 根据code显示不同的结果图标
-        if (code != null && code == 0) {
-            sb.append(message);  // 签到成功
-        } else if (code != null && code == -1) {
-            sb.append(message);  // 今日已签到
-        } else {
-            sb.append(message);  // 其他错误
-        }
+        sb.append(message == null ? getResultCode().getDescription() : message);
 
         if (userInfo != null) {
             if (userInfo.getCoins() != null) {
@@ -76,5 +68,14 @@ public class SignResultVO {
      */
     public boolean isSuccess() {
         return getResultCode().isSuccess();
+    }
+
+    /**
+     * 判断是否需要重新登录
+     *
+     * @return Cookie 是否失效
+     */
+    public boolean isAuthFailure() {
+        return getResultCode().isAuthFailure();
     }
 }

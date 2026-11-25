@@ -29,8 +29,9 @@ public class AliyunFcHandler implements StreamRequestHandler {
     @Override
     public void handleRequest(InputStream input, OutputStream output, Context context) throws IOException {
         try {
-            HifiniApplication.main(new String[]{});
-            output.write("success".getBytes(StandardCharsets.UTF_8));
+            int code = HifiniApplication.runCheckIn();
+            String result = code == 0 ? "success" : "error: 签到存在失败账号, exitCode=" + code;
+            output.write(result.getBytes(StandardCharsets.UTF_8));
         } catch (Exception e) {
             output.write(("error: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
         }
