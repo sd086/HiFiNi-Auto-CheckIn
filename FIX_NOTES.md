@@ -68,7 +68,9 @@
 | `vo/SignResultVO.java` | 移除 `code == 0` 的直接比较，统一走 `SignResultCode`；新增 `isAuthFailure()` |
 | `constant/HifiniConstants.java` | 新增 `HIFITI_*` / `HIFIHI_*` / 登录 URL / `REGEX_LOGIN_PAGE` |
 | `HifiniApplication.java` | 汇总失败数；`STRICT_FAIL=true` 时以退出码 1 结束，让 Actions 变红；输出 `EXIT_CODE` |
-| `.github/workflows/HiFiNi-Auto-CheckIn.yml` | 新增 `HIFINI_ACCOUNT`、`STRICT_FAIL`；`pipefail` + 日志回显关键行 |
+| `.github/workflows/HiFiNi-Auto-CheckIn.yml` | 新增 `HIFINI_ACCOUNT`、`STRICT_FAIL`；`permissions` 移到 job 外（原位置非法）；`cache: maven`；改用完整插件坐标；日志回显关键行 |
+| `pom.xml` | 显式声明 `exec-maven-plugin 3.1.1`（原工作流用 `mvn exec:java` 但 pom 未声明该插件，Maven Central 返回 429 时会报 `No plugin found for prefix 'exec'` 而构建失败，见 11-25 10:04 那次运行） |
+| `ScfHandler.java` / `AliyunFcHandler.java` | 改为调用 `runCheckIn()` 拿退出码，避免 `System.exit` 打断云函数收尾 |
 
 ### 关键代码（核心补丁）
 
