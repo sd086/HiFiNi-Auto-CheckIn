@@ -5,6 +5,7 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -206,45 +207,55 @@ public final class GuardSolver {
         }
     }
 
+    /** 最多握手轮次：服务器每次可能下发新的 guard，正常 1 次即可通过 */
+    private static final int MAX_GUARD_ROUNDS = 3;
+
     /**
      * 发起 GET 并自动通过网关。
+     *
+     * <p>网关可能每次都换发新的 guard，因此这里按 {@link #MAX_GUARD_ROUNDS} 轮循环，
+     * 每轮都用最新的 guard 重新计算 guardret，直到拿到非拦截页为止。
      *
      * @param client  OkHttp 客户端
      * @param url     目标地址
      * @param cookie  业务 Cookie（bbs_sid / bbs_token 等）
      * @param headers 额外请求头
      * @return 握手结果（code + body + 可复用 Cookie）
-     * @throws Exception 网络异常
+     * @throws IOException 网络异常
      */
     public static Result get(OkHttpClient client, HttpUrl url, String cookie,
-                             Map<String, String> headers) throws Exception {
-        try (Response response = execute(client, url, cookie, headers)) {
-            String body = ResponseUtils.readResponse(response);
-            if (!isGuardPage(body)) {
-                return new Result(response.code(), body, cookie);
-            }
+                             Map<String, String> headers) throws IOException {
+        String currentCookie = cookie;
+        int code = 0;
+        String body = "";
 
-            String guard = extractGuardCookie(response.headers("Set-Cookie"));
-            if (guard == null) {
-                return new Result(response.code(), body, cookie);
-            }
-            String guardRet = solve(guard);
-            if (guardRet == null) {
-                return new Result(response.code(), body, cookie);
-            }
+        for (int round = 0; round < MAX_GUARD_ROUNDS; round++) {
+            try (Response response = execute(client, url, currentCookie, headers)) {
+                code = response.code();
+                body = ResponseUtils.readResponse(response);
+                if (!isGuardPage(body)) {
+                    return new Result(code, body, currentCookie);
+                }
 
-            String merged = mergeCookie(cookie, COOKIE_GUARD, guard);
-            merged = mergeCookie(merged, COOKIE_GUARD_RET, guardRet);
+                String guard = extractGuardCookie(response.headers("Set-Cookie"));
+                if (guard == null) {
+                    // 没有 guard 可解，说明拦截机制变了，交由上层当作异常处理
+                    return new Result(code, body, currentCookie);
+                }
+                String guardRet = solve(guard);
+                if (guardRet == null) {
+                    return new Result(code, body, currentCookie);
+                }
 
-            try (Response second = execute(client, url, merged, headers)) {
-                String secondBody = ResponseUtils.readResponse(second);
-                return new Result(second.code(), secondBody, merged);
+                currentCookie = mergeCookie(currentCookie, COOKIE_GUARD, guard);
+                currentCookie = mergeCookie(currentCookie, COOKIE_GUARD_RET, guardRet);
             }
         }
+        return new Result(code, body, currentCookie);
     }
 
     private static Response execute(OkHttpClient client, HttpUrl url, String cookie,
-                                    Map<String, String> headers) throws Exception {
+                                    Map<String, String> headers) throws IOException {
         Request.Builder builder = new Request.Builder().url(url).get();
         if (cookie != null && !cookie.isEmpty()) {
             builder.addHeader("Cookie", cookie);
