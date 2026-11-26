@@ -78,9 +78,11 @@ public final class OkHttpUtils {
 
                     strictClient = new OkHttpClient.Builder()
                             .dispatcher(new Dispatcher(executor))
-                            .connectTimeout(HifiniConstants.DEFAULT_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                            .readTimeout(HifiniConstants.DEFAULT_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                            .writeTimeout(HifiniConstants.DEFAULT_WRITE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                            // 连接超时收紧到 12 秒：境外机房访问境内站点时，
+                            // 连不上通常是被直接丢包，等满 30 秒纯属浪费，会让整个工作流白等好几分钟
+                            .connectTimeout(12, TimeUnit.SECONDS)
+                            .readTimeout(20, TimeUnit.SECONDS)
+                            .writeTimeout(20, TimeUnit.SECONDS)
                             .protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1))
                             .followRedirects(true)
                             .followSslRedirects(true)
