@@ -16,6 +16,15 @@ public enum SignResultCode {
     FAILURE(2, "签到失败"),
     COOKIE_INVALID(401, "Cookie已失效"),
     NETWORK_ERROR(500, "网络错误"),
+    /**
+     * 运行环境不可达：TCP 连接无法建立（connect timed out / connection reset）。
+     *
+     * <p>与 {@link #NETWORK_ERROR} 的区别很关键：
+     * 只有"根本连不上目标站点"才属于环境限制；
+     * 一旦服务器回了 HTTP 状态码（如 403），说明链路是通的，那是站点拒绝了本次请求，
+     * 属于必须处理的真实失败，绝不能算作环境限制。
+     */
+    HOST_UNREACHABLE(502, "运行环境无法连接站点"),
     UNKNOWN_ERROR(999, "未知错误");
 
     private final int code;
@@ -73,14 +82,16 @@ public enum SignResultCode {
     /**
      * 判断是否为"环境不可达"类结果。
      *
-     * <p>这类结果与业务无关：网络不通、出口 IP 被站点屏蔽等，重试与换 Cookie 都无效。
-     * hifihi.com 服务器位于中国大陆，从 GitHub Actions（境外机房）访问时 TCP 会被丢弃，
+     * <p>仅当 TCP 层面完全连不上目标站点时才算。
+     * hifihi.com 服务器位于中国大陆，从 GitHub Actions（境外机房）访问时连接会被丢弃，
      * 属于典型的运行环境限制。若把它当作"签到失败"，工作流会每天变红，
-     * 掩盖真正需要处理的问题（例如 Cookie 过期）。
+     * 反而掩盖真正需要处理的问题（例如 Cookie 过期、站点 403 风控）。
+     *
+     * <p>注意：HTTP 4xx / 5xx 等"服务器有响应"的情况<b>不</b>在此列，必须算作失败。
      *
      * @return true 表示属于环境限制，不应计入签到失败
      */
     public boolean isEnvironmentBlocked() {
-        return this == NETWORK_ERROR;
+        return this == HOST_UNREACHABLE;
     }
 }
