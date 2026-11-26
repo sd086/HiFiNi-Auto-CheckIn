@@ -5,6 +5,8 @@ import cloud.ohiyou.constant.HifiniConstants;
 import cloud.ohiyou.constant.SignResultCode;
 import cloud.ohiyou.service.ISignService;
 import cloud.ohiyou.utils.CryptoUtils;
+import cloud.ohiyou.utils.GuardSolver;
+import cloud.ohiyou.utils.HostUnreachableException;
 import cloud.ohiyou.utils.OkHttpUtils;
 import cloud.ohiyou.utils.ResponseUtils;
 import cloud.ohiyou.utils.SignResponseParser;
@@ -91,37 +93,82 @@ public class HifitiSignService implements ISignService {
     /**
      * 校验 Cookie 是否有效：访问 my.htm，能解析到用户名/uid 说明登录态正常
      *
-     * @throws IOException 网络异常（无法判断登录态，不可当作失效）
+     * <p>站点偶尔会对云机房 IP 返回 403（风控），此时换一个 UA 稍等重试往往就能通过。
+     * 重试后仍 403 才视为真实失败，避免偶发风控把整天的签到判死。
+     *
+     * @throws HostUnreachableException TCP 层连不上（环境限制，不算签到失败）
+     * @throws IOException              连上了但请求失败（403/500 等，属于真实故障）
      */
     @Override
     public boolean isCookieValid(String cookie) throws IOException {
-        String userAgent = getRandomUserAgent();
+        int maxAttempts = 3;
+        int lastCode = 0;
+        IOException lastError = null;
 
-        Request request = new Request.Builder()
-                .url(HifiniConstants.HIFITI_USER_INFO_URL)
-                .get()
-                .addHeader("Cookie", cookie)
-                .addHeader("User-Agent", userAgent)
-                .addHeader("Referer", HifiniConstants.HIFITI_BASE_URL + "/")
-                .build();
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            String userAgent = getRandomUserAgent();
 
-        try (Response response = client.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                throw new IOException("校验登录态失败，HTTP 状态码: " + response.code());
+            Request request = new Request.Builder()
+                    .url(HifiniConstants.HIFITI_USER_INFO_URL)
+                    .get()
+                    .addHeader("Cookie", cookie)
+                    .addHeader("User-Agent", userAgent)
+                    .addHeader("Referer", HifiniConstants.HIFITI_BASE_URL + "/")
+                    .addHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                    .addHeader("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+                    .build();
+
+            try (Response response = client.newCall(request).execute()) {
+                lastCode = response.code();
+                // 403 / 429 多为瞬时风控：换 UA 等待后重试
+                if ((lastCode == 403 || lastCode == 429) && attempt < maxAttempts) {
+                    long delay = 1200L * attempt;
+                    logger.warn("HiFiTi 返回 {}（疑似风控），{}ms 后第 {} 次重试", lastCode, delay, attempt);
+                    sleepQuietly(delay);
+                    continue;
+                }
+                if (!response.isSuccessful()) {
+                    throw new IOException("校验登录态失败，HTTP 状态码: " + lastCode);
+                }
+                String pageContent = ResponseUtils.readResponse(response);
+                if (pageContent.contains(HifiniConstants.REGEX_LOGIN_PAGE)) {
+                    logger.warn("HiFiTi Cookie 已失效（返回登录页）");
+                    return false;
+                }
+                UserInfoVO userInfo = parseUserInfo(pageContent);
+                boolean valid = userInfo.getUserName() != null;
+                if (!valid) {
+                    logger.warn("HiFiTi Cookie 已失效（页面中未找到用户信息）");
+                } else {
+                    logger.info("HiFiTi Cookie 有效，用户: {}", userInfo.getUserName());
+                }
+                return valid;
+            } catch (IOException e) {
+                lastError = e;
+                if (GuardSolver.isHostUnreachable(e) && attempt < maxAttempts) {
+                    long delay = 1200L * attempt;
+                    logger.warn("HiFiTi 连接失败（{}），{}ms 后第 {} 次重试", e.getMessage(), delay, attempt);
+                    sleepQuietly(delay);
+                    continue;
+                }
+                break;
             }
-            String pageContent = ResponseUtils.readResponse(response);
-            if (pageContent.contains(HifiniConstants.REGEX_LOGIN_PAGE)) {
-                logger.warn("HiFiTi Cookie 已失效（返回登录页）");
-                return false;
+        }
+
+        if (lastError != null) {
+            if (GuardSolver.isHostUnreachable(lastError)) {
+                throw new HostUnreachableException(GuardSolver.describeNetworkError(lastError), lastError);
             }
-            UserInfoVO userInfo = parseUserInfo(pageContent);
-            boolean valid = userInfo.getUserName() != null;
-            if (!valid) {
-                logger.warn("HiFiTi Cookie 已失效（页面中未找到用户信息）");
-            } else {
-                logger.info("HiFiTi Cookie 有效，用户: {}", userInfo.getUserName());
-            }
-            return valid;
+            throw lastError;
+        }
+        throw new IOException("校验登录态失败，HTTP 状态码: " + lastCode);
+    }
+
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
