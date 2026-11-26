@@ -1,6 +1,7 @@
 package cloud.ohiyou.service;
 
 import cloud.ohiyou.constant.SignResultCode;
+import cloud.ohiyou.utils.HostUnreachableException;
 import cloud.ohiyou.vo.SignResultVO;
 import cloud.ohiyou.vo.UserInfoVO;
 
@@ -71,10 +72,14 @@ public interface ISignService {
                 return new SignResultVO(SignResultCode.COOKIE_INVALID.getCode(),
                         "Cookie已失效，请重新获取 Cookie");
             }
+        } catch (HostUnreachableException e) {
+            // TCP 层根本连不上：属于运行环境限制，不计入"签到失败"
+            return new SignResultVO(SignResultCode.HOST_UNREACHABLE.getCode(),
+                    "运行环境无法连接站点：" + e.getMessage());
         } catch (IOException e) {
-            // 网络层问题与登录态无关，不能覆盖成 401，否则会误导用户去换 Cookie
+            // 连上了但请求失败（如 HTTP 403）：这是真实故障，必须计入失败
             return new SignResultVO(SignResultCode.NETWORK_ERROR.getCode(),
-                    "网络异常，无法校验登录态：" + e.getMessage());
+                    "请求站点失败：" + e.getMessage());
         }
 
         SignResultVO signResult = signIn(cookie);
