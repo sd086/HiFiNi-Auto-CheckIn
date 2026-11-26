@@ -4,6 +4,7 @@ import cloud.ohiyou.constant.HifiniConstants;
 import cloud.ohiyou.constant.SignResultCode;
 import cloud.ohiyou.service.ISignService;
 import cloud.ohiyou.utils.GuardSolver;
+import cloud.ohiyou.utils.HostUnreachableException;
 import cloud.ohiyou.utils.OkHttpUtils;
 import cloud.ohiyou.utils.ResponseUtils;
 import cloud.ohiyou.utils.SignResponseParser;
@@ -138,13 +139,17 @@ public class HifihiSignService implements ISignService {
             result = GuardSolver.get(client,
                     HttpUrl.get(HifiniConstants.HIFIHI_USER_INFO_URL), cookie, headers);
         } catch (IOException e) {
-            // 把底层异常翻译成人话，避免用户误以为是 Cookie 问题
-            logger.error("HiFiHi 无法连接站点（已重试 {} 次）: {}",
+            logger.error("HiFiHi 请求失败（已重试 {} 次）: {}",
                     GuardSolver.MAX_NETWORK_RETRIES_PUBLIC, e.getMessage());
-            throw new IOException(GuardSolver.describeNetworkError(e), e);
+            // 只有 TCP 层根本连不上才算环境限制；能连上但被拒（如 403）属于真实故障
+            if (GuardSolver.isHostUnreachable(e)) {
+                throw new HostUnreachableException(GuardSolver.describeNetworkError(e), e);
+            }
+            throw new IOException("请求站点失败：" + GuardSolver.describeNetworkError(e), e);
         }
 
         if (result.getCode() != 200) {
+            // 服务器回了状态码，说明链路是通的，这是真实的请求失败，不能算环境限制
             throw new IOException("校验登录态失败，HTTP 状态码: " + result.getCode());
         }
 
