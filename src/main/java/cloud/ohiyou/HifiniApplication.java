@@ -12,6 +12,7 @@ import cloud.ohiyou.service.impl.HifitiSignService;
 import cloud.ohiyou.service.push.IMessagePushStrategy;
 import cloud.ohiyou.utils.OkHttpUtils;
 import cloud.ohiyou.vo.CookieSignResult;
+import cloud.ohiyou.vo.SignResultVO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -96,9 +97,34 @@ public class HifiniApplication {
             ResultPublisher publisher = new ResultPublisher(strategies);
             publisher.publish(allResults);
 
-            long failed = allResults.stream()
-                    .filter(r -> r.getSignResult() == null || !r.getSignResult().isSuccess())
-                    .count();
+            // 统计口径区分三类，避免"环境不可达"被当成"签到失败"：
+            //   失败   —— 业务问题（Cookie 失效、接口报错），需要人处理 → 工作流变红
+            //   受限   —— 网络/环境不可达，重试与换 Cookie 都无效 → 仅告警，不变红
+            //   成功   —— 签到成功或今日已签到
+            long failed = 0;
+            long blocked = 0;
+            for (CookieSignResult r : allResults) {
+                SignResultVO sr = r.getSignResult();
+                if (sr == null) {
+                    failed++;
+                    continue;
+                }
+                if (sr.isSuccess()) {
+                    continue;
+                }
+                if (sr.getResultCode().isEnvironmentBlocked()) {
+                    blocked++;
+                    continue;
+                }
+                failed++;
+            }
+
+            if (blocked > 0) {
+                logger.warn("有 {} 个账号因运行环境限制未能签到（通常是出口 IP 无法访问站点，"
+                        + "非 Cookie 问题，重试无效）。如日志所示的目标站点位于中国大陆时，"
+                        + "请改用境内网络或云函数固定 IP 运行。", blocked);
+            }
+
             logger.info("EXIT_CODE={}", failed > 0 ? EXIT_FAIL : EXIT_OK);
             if (failed > 0 && strictFail) {
                 logger.error("有 {} 个账号签到失败，工作流标记为失败", failed);
