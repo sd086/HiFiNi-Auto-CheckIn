@@ -4,6 +4,8 @@ import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -210,21 +212,144 @@ public final class GuardSolver {
     /** 最多握手轮次：服务器每次可能下发新的 guard，正常 1 次即可通过 */
     private static final int MAX_GUARD_ROUNDS = 3;
 
+    /** 网络层失败（连接被切断）时的重试次数 */
+    public static final int MAX_NETWORK_RETRIES_PUBLIC = 3;
+
+    /** 内部使用的重试次数（与公开常量保持一致，便于日志引用） */
+    private static final int MAX_NETWORK_RETRIES = MAX_NETWORK_RETRIES_PUBLIC;
+
+    /** 重试的基准退避毫秒数，按 1x / 2x / 4x 递增 */
+    private static final long RETRY_BASE_DELAY_MS = 1500L;
+
+    private static final Logger logger = LoggerFactory.getLogger(GuardSolver.class);
+
     /**
-     * 发起 GET 并自动通过网关。
+     * 发起 GET 并自动通过网关，网络层异常自动重试。
      *
-     * <p>网关可能每次都换发新的 guard，因此这里按 {@link #MAX_GUARD_ROUNDS} 轮循环，
-     * 每轮都用最新的 guard 重新计算 guardret，直到拿到非拦截页为止。
+     * <p>云机房网络（如 GitHub Actions）访问 hifihi 时常出现
+     * {@code unexpected end of stream} / {@code Connection reset}，
+     * 这是中间链路把连接单方面掐断导致的，换一条新连接往往就能成功。
+     * 因此这里对这类异常做指数退避重试，同时每轮都重新握手（guard 是一次性的）。
      *
      * @param client  OkHttp 客户端
      * @param url     目标地址
      * @param cookie  业务 Cookie（bbs_sid / bbs_token 等）
      * @param headers 额外请求头
      * @return 握手结果（code + body + 可复用 Cookie）
-     * @throws IOException 网络异常
+     * @throws IOException 网络异常（重试后仍失败）
      */
     public static Result get(OkHttpClient client, HttpUrl url, String cookie,
                              Map<String, String> headers) throws IOException {
+        IOException lastError = null;
+
+        for (int attempt = 0; attempt <= MAX_NETWORK_RETRIES; attempt++) {
+            if (attempt > 0) {
+                long delay = RETRY_BASE_DELAY_MS * (1L << (attempt - 1));
+                logger.warn("HiFiHi 网络层请求失败（{}），{}ms 后第 {} 次重试",
+                        lastError == null ? "未知" : lastError.getMessage(), delay, attempt);
+                sleepQuietly(delay);
+            }
+
+            try {
+                return handshake(client, url, cookie, headers);
+            } catch (IOException e) {
+                if (!isRetryable(e)) {
+                    throw e;
+                }
+                lastError = e;
+            }
+        }
+        throw lastError == null ? new IOException("请求失败") : lastError;
+    }
+
+    /**
+     * 判断异常是否值得重试：连接被对端切断（而不是证书错误、域名解析失败等）
+     */
+    public static boolean isRetryable(Throwable e) {
+        Throwable t = e;
+        int depth = 0;
+        while (t != null && depth++ < 6) {
+            if (t instanceof java.net.SocketTimeoutException
+                    || t instanceof java.net.ConnectException
+                    || t instanceof java.net.SocketException
+                    || t instanceof javax.net.ssl.SSLException) {
+                return true;
+            }
+            String msg = t.getMessage();
+            if (msg != null) {
+                String lower = msg.toLowerCase();
+                if (lower.contains("unexpected end of stream")
+                        || lower.contains("connection reset")
+                        || lower.contains("connection refused")
+                        || lower.contains("broken pipe")
+                        || lower.contains("stream was reset")
+                        || lower.contains("premature")) {
+                    return true;
+                }
+            }
+            t = t.getCause();
+        }
+        return false;
+    }
+
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * 带重试地执行任意请求（POST 签到等非 GET 场景用）。
+     *
+     * <p>与 {@link #get} 共用同一套重试策略：遇到连接被切断类异常时指数退避重试。
+     * 注意 POST 请求每次重试都会重新调用 {@code requestFactory}，确保请求体可重发。
+     *
+     * @param client         客户端
+     * @param requestFactory 请求构造器（每次重试都会重新调用）
+     * @return 响应结果
+     * @throws IOException 重试后仍失败
+     */
+    public static Result executeWithRetry(OkHttpClient client, RequestFactory requestFactory)
+            throws IOException {
+        IOException lastError = null;
+
+        for (int attempt = 0; attempt <= MAX_NETWORK_RETRIES; attempt++) {
+            if (attempt > 0) {
+                long delay = RETRY_BASE_DELAY_MS * (1L << (attempt - 1));
+                logger.warn("HiFiHi 请求失败（{}），{}ms 后第 {} 次重试",
+                        lastError == null ? "未知" : lastError.getMessage(), delay, attempt);
+                sleepQuietly(delay);
+            }
+            try (Response response = client.newCall(requestFactory.create()).execute()) {
+                String body = ResponseUtils.readResponse(response);
+                return new Result(response.code(), body, null);
+            } catch (IOException e) {
+                if (!isRetryable(e)) {
+                    throw e;
+                }
+                lastError = e;
+            }
+        }
+        throw lastError == null ? new IOException("请求失败") : lastError;
+    }
+
+    /**
+     * 请求构造器，供 {@link #executeWithRetry} 在每次重试时重新生成请求
+     */
+    public interface RequestFactory {
+        /**
+         * @return 全新的请求对象
+         */
+        Request create();
+    }
+
+    /**
+     * 单次握手流程（可能包含多轮 guard 计算）
+     */
+    private static Result handshake(OkHttpClient client, HttpUrl url, String cookie,
+                                    Map<String, String> headers) throws IOException {
         String currentCookie = cookie;
         int code = 0;
         String body = "";
