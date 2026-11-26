@@ -272,26 +272,31 @@ public final class GuardSolver {
      * 判断异常是否值得重试：连接被对端切断（而不是证书错误、域名解析失败等）
      */
     public static boolean isRetryable(Throwable e) {
+        // 域名解析失败重试也没用（除非 DNS 抖动，但那属于极少见情况），直接放弃
         Throwable t = e;
         int depth = 0;
         while (t != null && depth++ < 6) {
-            if (t instanceof java.net.SocketTimeoutException
-                    || t instanceof java.net.ConnectException
-                    || t instanceof java.net.SocketException
-                    || t instanceof javax.net.ssl.SSLException) {
+            if (t instanceof java.net.UnknownHostException) {
+                return false;
+            }
+            t = t.getCause();
+        }
+        return isHostUnreachable(e) || isTimeout(e);
+    }
+
+    /**
+     * 判断是否为超时类异常
+     */
+    private static boolean isTimeout(Throwable e) {
+        Throwable t = e;
+        int depth = 0;
+        while (t != null && depth++ < 6) {
+            if (t instanceof java.net.SocketTimeoutException) {
                 return true;
             }
             String msg = t.getMessage();
-            if (msg != null) {
-                String lower = msg.toLowerCase();
-                if (lower.contains("unexpected end of stream")
-                        || lower.contains("connection reset")
-                        || lower.contains("connection refused")
-                        || lower.contains("broken pipe")
-                        || lower.contains("stream was reset")
-                        || lower.contains("premature")) {
-                    return true;
-                }
+            if (msg != null && msg.toLowerCase().contains("timed out")) {
+                return true;
             }
             t = t.getCause();
         }
@@ -304,6 +309,43 @@ public final class GuardSolver {
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    /**
+     * 判断异常是否属于「TCP 层面根本连不上目标站点」。
+     *
+     * <p>这类情况才可归入"运行环境限制"（HOST_UNREACHABLE）：
+     * 连接超时、连接被重置、域名解析失败、TLS 握手失败。
+     * 一旦服务器返回了 HTTP 状态码，就不属于这里 —— 那是站点明确拒绝了请求。
+     *
+     * @param e 异常
+     * @return true 表示连不上
+     */
+    public static boolean isHostUnreachable(Throwable e) {
+        Throwable t = e;
+        int depth = 0;
+        while (t != null && depth++ < 6) {
+            if (t instanceof java.net.ConnectException
+                    || t instanceof java.net.UnknownHostException
+                    || t instanceof java.net.NoRouteToHostException
+                    || t instanceof javax.net.ssl.SSLException) {
+                return true;
+            }
+            String msg = t.getMessage();
+            if (msg != null) {
+                String lower = msg.toLowerCase();
+                if (lower.contains("connect timed out")
+                        || lower.contains("connection timed out")
+                        || lower.contains("connection refused")
+                        || lower.contains("no route to host")
+                        || lower.contains("unexpected end of stream")
+                        || lower.contains("connection reset")) {
+                    return true;
+                }
+            }
+            t = t.getCause();
+        }
+        return false;
     }
 
     /**
@@ -322,7 +364,7 @@ public final class GuardSolver {
         String lower = raw == null ? "" : raw.toLowerCase();
 
         if (lower.contains("connect timed out") || lower.contains("connection timed out")) {
-            return raw + "（reached 连接超时：目标站点疑似屏蔽了当前出口 IP。"
+            return raw + "（连接超时：目标站点疑似屏蔽了当前出口 IP。"
                     + "hifihi.com 服务器位于中国大陆，GitHub Actions 等境外机房通常无法直连，"
                     + "建议改用境内网络 / 自建设备运行，或改用云函数固定 IP）";
         }
