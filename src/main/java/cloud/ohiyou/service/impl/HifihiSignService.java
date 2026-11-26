@@ -29,7 +29,11 @@ public class HifihiSignService implements ISignService {
 
     private static final Logger logger = LoggerFactory.getLogger(HifihiSignService.class);
 
-    private static final OkHttpClient client = OkHttpUtils.getClient();
+    /**
+     * hifihi 的网关对连接质量很敏感：云机房网络复用空闲连接时极易被中间设备掐断
+     * （表现为 unexpected end of stream），因此这里使用"每次新建连接"的专用客户端。
+     */
+    private static final OkHttpClient client = OkHttpUtils.getNoReuseClient();
     private final Random random = new Random();
 
     @Override
@@ -47,38 +51,40 @@ public class HifihiSignService implements ISignService {
     public SignResultVO signIn(String cookie) {
         try {
             String userAgent = getRandomUserAgent();
-            String effectiveCookie = ensureGuard(cookie, userAgent);
+            final String effectiveCookie = ensureGuard(cookie, userAgent);
 
-            RequestBody emptyBody = RequestBody.create("",
-                    MediaType.get("application/x-www-form-urlencoded; charset=UTF-8"));
+            // 用带重试的执行器发送签到请求：云机房网络下连接可能被中途掐断，
+            // 换一条新连接重试通常就能成功（参考 GuardSolver.isRetryable）
+            GuardSolver.Result result = GuardSolver.executeWithRetry(client,
+                    () -> {
+                        RequestBody emptyBody = RequestBody.create("",
+                                MediaType.get("application/x-www-form-urlencoded; charset=UTF-8"));
+                        return new Request.Builder()
+                                .url(HifiniConstants.HIFIHI_SIGN_URL)
+                                .post(emptyBody)
+                                .addHeader("Cookie", effectiveCookie)
+                                .addHeader("User-Agent", userAgent)
+                                .addHeader("X-Requested-With", "XMLHttpRequest")
+                                .addHeader("Referer", HifiniConstants.HIFIHI_BASE_URL + "/")
+                                .addHeader("Accept", "application/json, text/javascript, */*; q=0.01")
+                                .addHeader("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+                                .build();
+                    });
 
-            Request request = new Request.Builder()
-                    .url(HifiniConstants.HIFIHI_SIGN_URL)
-                    .post(emptyBody)
-                    .addHeader("Cookie", effectiveCookie)
-                    .addHeader("User-Agent", userAgent)
-                    .addHeader("X-Requested-With", "XMLHttpRequest")
-                    .addHeader("Referer", HifiniConstants.HIFIHI_BASE_URL + "/")
-                    .addHeader("Accept", "application/json, text/javascript, */*; q=0.01")
-                    .addHeader("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-                    .build();
-
-            try (Response response = client.newCall(request).execute()) {
-                if (!response.isSuccessful()) {
-                    return new SignResultVO(SignResultCode.FAILURE.getCode(),
-                            "请求失败，Http状态码：" + response.code());
-                }
-
-                String responseBody = ResponseUtils.readResponse(response);
-                logger.info("HiFiHi 签到响应内容: {}", responseBody);
-
-                // 网关拦截页不是 JSON，直接判为网络/防护问题，避免被当成"请登录"误报
-                if (GuardSolver.isGuardPage(responseBody)) {
-                    return new SignResultVO(SignResultCode.NETWORK_ERROR.getCode(),
-                            "请求被站点反爬网关拦截，请检查 GuardSolver 实现");
-                }
-                return SignResponseParser.parse(responseBody);
+            if (result.getCode() != 200) {
+                return new SignResultVO(SignResultCode.FAILURE.getCode(),
+                        "请求失败，Http状态码：" + result.getCode());
             }
+
+            String responseBody = result.getBody();
+            logger.info("HiFiHi 签到响应内容: {}", responseBody);
+
+            // 网关拦截页不是 JSON，直接判为网络/防护问题，避免被当成"请登录"误报
+            if (GuardSolver.isGuardPage(responseBody)) {
+                return new SignResultVO(SignResultCode.NETWORK_ERROR.getCode(),
+                        "请求被站点反爬网关拦截，请检查 GuardSolver 实现");
+            }
+            return SignResponseParser.parse(responseBody);
         } catch (Exception e) {
             logger.error("HiFiHi 签到异常: {}", e.getMessage(), e);
             return new SignResultVO(SignResultCode.NETWORK_ERROR.getCode(), "签到异常：" + e.getMessage());
@@ -91,7 +97,7 @@ public class HifihiSignService implements ISignService {
      * <p>这里不判断 Cookie 里是否已有 guardret：网关的 guard 是一次性且会过期的，
      * 复用旧值大概率被拒绝，直接走一次握手（额外一个 GET）最稳。
      *
-     * @return 可直接用于后续请求的 Cookie；握手失败时回退原 Cookie
+     * @return 可直接用于后续请求的 Cookie；握手失败时回退原 Cookie（由调用方按结果判断）
      */
     private String ensureGuard(String cookie, String userAgent) {
         try {
@@ -102,9 +108,10 @@ public class HifihiSignService implements ISignService {
                 logger.debug("HiFiHi 反爬网关握手成功");
                 return result.getCookie();
             }
-            logger.warn("HiFiHi 反爬网关握手未通过，继续使用原始 Cookie 尝试");
+            logger.warn("HiFiHi 反爬网关握手未通过（页面仍为拦截页），继续使用原始 Cookie 尝试");
         } catch (Exception e) {
-            logger.warn("HiFiHi 反爬网关握手异常: {}", e.getMessage());
+            logger.warn("HiFiHi 反爬网关握手异常（已重试 {} 次）: {}",
+                    GuardSolver.MAX_NETWORK_RETRIES_PUBLIC, e.getMessage());
         }
         return cookie;
     }
@@ -153,14 +160,21 @@ public class HifihiSignService implements ISignService {
     }
 
     /**
-     * 拼接 HTML 页面请求头
+     * 拼接 HTML 页面请求头。
+     * 尽量贴近真实浏览器（含 Sec-Fetch-* 等），降低被网关/风控针对的概率。
      */
     private Map<String, String> htmlHeaders(String userAgent) {
         Map<String, String> headers = new LinkedHashMap<>();
         headers.put("User-Agent", userAgent);
-        headers.put("Referer", HifiniConstants.HIFIHI_BASE_URL + "/");
-        headers.put("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+        headers.put("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8");
         headers.put("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
+        headers.put("Cache-Control", "max-age=0");
+        headers.put("Upgrade-Insecure-Requests", "1");
+        headers.put("Sec-Fetch-Dest", "document");
+        headers.put("Sec-Fetch-Mode", "navigate");
+        headers.put("Sec-Fetch-Site", "none");
+        headers.put("Sec-Fetch-User", "?1");
+        headers.put("Referer", HifiniConstants.HIFIHI_BASE_URL + "/");
         return headers;
     }
 
