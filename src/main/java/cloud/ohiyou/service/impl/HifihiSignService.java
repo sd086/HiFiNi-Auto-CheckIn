@@ -133,8 +133,16 @@ public class HifihiSignService implements ISignService {
         String userAgent = getRandomUserAgent();
         Map<String, String> headers = htmlHeaders(userAgent);
 
-        GuardSolver.Result result = GuardSolver.get(client,
-                HttpUrl.get(HifiniConstants.HIFIHI_USER_INFO_URL), cookie, headers);
+        GuardSolver.Result result;
+        try {
+            result = GuardSolver.get(client,
+                    HttpUrl.get(HifiniConstants.HIFIHI_USER_INFO_URL), cookie, headers);
+        } catch (IOException e) {
+            // 把底层异常翻译成人话，避免用户误以为是 Cookie 问题
+            logger.error("HiFiHi 无法连接站点（已重试 {} 次）: {}",
+                    GuardSolver.MAX_NETWORK_RETRIES_PUBLIC, e.getMessage());
+            throw new IOException(GuardSolver.describeNetworkError(e), e);
+        }
 
         if (result.getCode() != 200) {
             throw new IOException("校验登录态失败，HTTP 状态码: " + result.getCode());
