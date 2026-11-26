@@ -69,4 +69,18 @@ public enum SignResultCode {
     public boolean isAuthFailure() {
         return this == COOKIE_INVALID;
     }
+
+    /**
+     * 判断是否为"环境不可达"类结果。
+     *
+     * <p>这类结果与业务无关：网络不通、出口 IP 被站点屏蔽等，重试与换 Cookie 都无效。
+     * hifihi.com 服务器位于中国大陆，从 GitHub Actions（境外机房）访问时 TCP 会被丢弃，
+     * 属于典型的运行环境限制。若把它当作"签到失败"，工作流会每天变红，
+     * 掩盖真正需要处理的问题（例如 Cookie 过期）。
+     *
+     * @return true 表示属于环境限制，不应计入签到失败
+     */
+    public boolean isEnvironmentBlocked() {
+        return this == NETWORK_ERROR;
+    }
 }
