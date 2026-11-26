@@ -58,6 +58,7 @@ public class ResultPublisher {
         boolean allSuccess = true;
         int successCount = 0;
         int totalCount = results != null ? results.size() : 0;
+        int blockedCount = 0;
 
         if (results == null || results.isEmpty()) {
             messageBuilder.append("未获取到任何签到结果，请检查任务执行情况。\n");
@@ -77,14 +78,29 @@ public class ResultPublisher {
                 SignResultCode resultCode = SignResultCode.fromCode(signResult.getCode());
                 if (resultCode.isSuccess()) {
                     successCount++;
+                } else if (resultCode.isEnvironmentBlocked()) {
+                    // 运行环境连不上站点：不是业务失败，单独统计，不拉低"成功率"
+                    blockedCount++;
                 } else {
                     allSuccess = false;
                 }
             }
         }
 
-        String title = allSuccess ? "自动签到成功" : "自动签到失败";
+        // 标题分三种：全部成功 / 部分因环境受限（不算失败）/ 确实有失败
+        String title;
+        if (allSuccess && blockedCount > 0) {
+            title = "自动签到部分完成（" + blockedCount + " 个站点因网络环境受限已跳过）";
+        } else if (allSuccess) {
+            title = "自动签到成功";
+        } else {
+            title = "自动签到失败";
+        }
+
         messageBuilder.append(String.format("\n签到统计: %d/%d 成功", successCount, totalCount));
+        if (blockedCount > 0) {
+            messageBuilder.append(String.format("，%d 个因网络环境受限跳过", blockedCount));
+        }
 
         return new PublishContent(title, messageBuilder.toString(), successCount, totalCount);
     }
