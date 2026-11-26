@@ -213,13 +213,19 @@ public final class GuardSolver {
     private static final int MAX_GUARD_ROUNDS = 3;
 
     /** 网络层失败（连接被切断）时的重试次数 */
-    public static final int MAX_NETWORK_RETRIES_PUBLIC = 3;
+    public static final int MAX_NETWORK_RETRIES_PUBLIC = 2;
 
     /** 内部使用的重试次数（与公开常量保持一致，便于日志引用） */
     private static final int MAX_NETWORK_RETRIES = MAX_NETWORK_RETRIES_PUBLIC;
 
-    /** 重试的基准退避毫秒数，按 1x / 2x / 4x 递增 */
-    private static final long RETRY_BASE_DELAY_MS = 1500L;
+    /**
+     * 重试的基准退避毫秒数，按 1x / 2x 递增。
+     *
+     * <p>刻意保持较短：hifihi.com 从境外机房访问时是"TCP 直接连不上"，
+     * 长退避没有意义，只会让工作流白等好几分钟。真正需要长等待的是临时抖动，
+     * 而临时抖动通常一次重试就能恢复。
+     */
+    private static final long RETRY_BASE_DELAY_MS = 800L;
 
     private static final Logger logger = LoggerFactory.getLogger(GuardSolver.class);
 
@@ -298,6 +304,51 @@ public final class GuardSolver {
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    /**
+     * 把网络异常翻译成可操作的中文说明。
+     *
+     * <p>hifihi.com 的服务器位于中国大陆（111.92.243.x，中国移动福建），
+     * 从境外机房（如 GitHub Actions 的 Azure westus2）访问时 TCP 会被直接丢弃，
+     * 表现为 {@code connect timed out} 或 {@code unexpected end of stream}。
+     * 这类问题换 Cookie、重试都没用，必须改变出口网络位置。
+     *
+     * @param e 原始异常
+     * @return 面向使用者的说明
+     */
+    public static String describeNetworkError(Throwable e) {
+        String raw = rootMessage(e);
+        String lower = raw == null ? "" : raw.toLowerCase();
+
+        if (lower.contains("connect timed out") || lower.contains("connection timed out")) {
+            return raw + "（reached 连接超时：目标站点疑似屏蔽了当前出口 IP。"
+                    + "hifihi.com 服务器位于中国大陆，GitHub Actions 等境外机房通常无法直连，"
+                    + "建议改用境内网络 / 自建设备运行，或改用云函数固定 IP）";
+        }
+        if (lower.contains("unexpected end of stream")) {
+            return raw + "（连接被对端中途切断：常见于跨境链路或站点防火墙主动丢包，"
+                    + "重试通常无效，需更换出口网络）";
+        }
+        if (lower.contains("connection reset")) {
+            return raw + "（连接被重置：目标站点主动拒绝，可能是 IP 被风控或跨境阻断）";
+        }
+        return raw == null ? "未知网络异常" : raw;
+    }
+
+    /**
+     * 取最内层异常的消息，便于定位真实原因
+     */
+    public static String rootMessage(Throwable e) {
+        Throwable t = e;
+        Throwable last = e;
+        int depth = 0;
+        while (t != null && depth++ < 6) {
+            last = t;
+            t = t.getCause();
+        }
+        String msg = last == null ? null : last.getMessage();
+        return msg == null || msg.isEmpty() ? (last == null ? null : last.getClass().getSimpleName()) : msg;
     }
 
     /**
