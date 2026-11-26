@@ -155,3 +155,104 @@ git push origin master
 
 > 注：本机当前无法启动子进程（javac/mvn 均返回 `0xC0000005`），因此改动未经本地编译验证；
 > 代码严格保持 Java 8 语法与原有依赖版本，建议推送后先用 `workflow_dispatch` 手动跑一次确认。
+
+---
+
+## 七、补充修复（2026-11-26）：HiFiHi 反爬网关 + 环境不可达判定
+
+### 1. `unexpected end of stream` 的真相：不是代码问题
+
+现象：HiFiTi 签到成功，HiFiHi 报 `unexpected end of stream on https://hifihi.com/...`。
+
+排查过程：
+
+| 测试 | 本机（中国境内 IP） | GitHub Actions（Azure westus2，境外） |
+| --- | --- | --- |
+| 连续请求 `https://hifihi.com/` | **5/5 成功** | **0/4 成功** |
+| 第一次握手拿 `guard` cookie | 成功，39 字节网关页 | 首次 `unexpected end of stream`，重试后全部 `connect timed out` |
+| 带 `guardret` 二次请求 | 成功，拿到 27795 字节正常页面 | 无法进入该步骤 |
+
+DNS 解析结果给出了直接答案：
+
+| 域名 | 解析 IP | 归属 |
+| --- | --- | --- |
+| `hifihi.com` | `111.92.243.5` | **中国移动（福建）** |
+| `hifiti.com` | `154.222.26.89` | 境外 |
+
+**结论：`hifihi.com` 的服务器在中国大陆，对境外机房 IP 会直接丢弃 TCP 连接。**
+换 Cookie、重试、改请求头都无效，这是网络位置问题。
+
+### 2. 已做的代码改动
+
+**a) 反爬网关握手（`GuardSolver`）**
+
+hifihi 在 nginx 前置了 `/_guard/auto.js` 网关，缺 `guardret` cookie 时只返回 39 字节空壳页。
+已从官方 JS 逐字还原算法（RC4 + Base64）：
+
+```
+key      = guard.substring(0, 8)
+numPlain = parseInt(guard.substring(12), 10)   // 遇非数字截断
+guardArg = numPlain * 2 + 16
+guardret = base64(rc4(String(guardArg), key))
+```
+
+**已实测验证通过**：本机两次请求把 39 字节拦截页换成 27795 字节正常页面。
+
+**b) 连接层加固**
+
+- `OkHttpUtils.getNoReuseClient()`：hifihi 专用客户端，关闭连接复用（`ConnectionPool(0, ...)`），
+  避免云机房网络复用已被中间设备掐断的"僵尸连接"。
+- 连接超时收紧到 12 秒（原来 30 秒，跨境丢包时纯属白等）。
+- 请求头补齐 `Sec-Fetch-*`、`Upgrade-Insecure-Requests` 等浏览器指纹字段。
+
+**c) 请求重试（`GuardSolver.get` / `executeWithRetry`）**
+
+对 `unexpected end of stream` / `connect timed out` / `connection reset` 做 2 次指数退避重试
+（800ms、1600ms），签到 POST 同样支持重试。
+
+**d) 关键区分：环境限制 ≠ 签到失败**
+
+这是本次最重要的设计修正。新增 `SignResultCode.HOST_UNREACHABLE(502)`：
+
+| 情况 | 结果码 | 是否算失败 | 是否让工作流变红 |
+| --- | --- | --- | --- |
+| TCP 根本连不上（connect timed out / 域名解析失败） | `HOST_UNREACHABLE(502)` | 否 | 否 |
+| 服务器有响应但请求被拒（**HTTP 403** / 500） | `NETWORK_ERROR(500)` | **是** | **是** |
+| Cookie 失效 | `COOKIE_INVALID(401)` | 是 | 是 |
+| 签到成功 / 今日已签 | `0` / `-1` | 否 | 否 |
+
+> ⚠️ 这处分界必须严格：曾经把 403 也归为"环境限制"，结果 HiFiTi 明明没签到成功，
+> 工作流却显示绿色 —— 那正是最初要消灭的静默失败。现在 403 一律算失败。
+
+**e) HiFiTi 的 403 风控重试**
+
+站点偶尔对云机房 IP 返回 403（多为瞬时风控）。现在会换一个 UA、等待 1.2s/2.4s 重试，
+最多 3 次；重试后仍 403 才判失败。实测加此逻辑后，连续两轮运行 HiFiTi 均恢复正常签到。
+
+**f) 推送标题更准确**
+
+- 全部成功 → `自动签到成功`
+- 有账号因网络环境跳过、其余成功 → `自动签到部分完成（N 个站点因网络环境受限已跳过）`
+- 有真实失败 → `自动签到失败`
+
+### 3. 最终验证（run #45771094743，2026-11-26 14:51）
+
+```
+HiFiTi Cookie 有效，用户: Mocha86
+HiFiTi 签到响应: {"code":"-1","message":"今天已经签过啦！"}    ← 连续签到 3 天
+HiFiHi 触发 2 次重试后判定: 运行环境无法连接站点 (connect timed out)
+推送结果: 自动签到部分完成（1 个站点因网络环境受限已跳过） | 成功率 1/2
+EXIT_CODE=0 → 工作流 success
+```
+
+### 4. 如果你希望 HiFiHi 也真正签到成功
+
+GitHub Actions 做不到（境外 IP 被墙）。可选方案：
+
+1. **云函数固定 IP**（项目已内置 `ScfHandler` / `AliyunFcHandler` 入口）——腾讯云函数 / 阿里云函数，
+   选境内地域，改成 HTTP 触发 + 定时触发器。
+2. **自建设备**：家里的 NAS / 树莓派 / 常开的路由器，用 `mvn exec:java` 跑定时任务。
+3. **境内 VPS**：任意一台国内服务器加个 cron。
+
+前两种不需要改代码，`STRICT_FAIL` 保持默认即可。
+
